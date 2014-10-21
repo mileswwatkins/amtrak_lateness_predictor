@@ -1,53 +1,56 @@
 import datetime
+import itertools
 
+from bs4 import BeautifulSoup
+import dateutil
 import requests
 
 
 def parse_response(response_text):
-	'''Extract train time information from the Dixieland response'''
+	'''Extract train time information from the juckins.net response'''
 
-	# Split out each row containing data
-	FIRST_ROW_OF_DATA = 12
-	data_lines = response_text.split("\n")[FIRST_ROW_OF_DATA - 1 :]
+	# Create a table parser
+	table_parser = BeautifulSoup(response_text)
+	table = table_parser.find("table")
+	rows = iter(table.findAll("tr"))
 
-	# Determine the number of characters in each field
-	max_line_length = 0
-	for line in data_lines:
-		line_length = len(line)
-		if line_length > max_line_length:
-			max_line_length = line_length
+	# Determine the names of each field
+	_table_title = next(rows)
+	field_names = [header.text for header in next(rows)]
 
-	field_widths = [2, 5, 3, 6, 3, 6, 6, 6]
-	comment_field_length = max_line_length - sum(field_widths)
-	field_widths.append(comment_field_length)
+	# Extract the values from each row
+	all_values = []
+	for row in rows:
+		values = [cell.text for cell in row]
+		values_labeled = dict(itertools.izip(field_names, values))
+		all_values.append(values_labeled)
 
-	# Parse each row of data
-	FIELD_NAMES = [
-			"have_data",
-			"station_code",
-			"scheduled_arrival_day",
-			"scheduled_arrival_time",
-			"scheduled_departure_day",
-			"scheduled_departure_time",
-			"actual_arrival_time",
-			"actual_departure_time",
-			"comments"
-			]
+	return all_values
 
-	for line in data_lines:
-		values = []
 
-		for field_number in range(len(field_widths)):
-			first_character = sum(field_widths[:field_number])
-			last_character = first_character + field_widths[field_number]
+def clean_table(table):
+	'''Remove useless columns and convert to proper data types'''
 
-			value = {
-					FIELD_NAMES[field_number]:
-					line[first_character:last_character]
-					}
-			values.append(value)
-
+	cleaned_table = []
+	for row in table:
 		
+		drop_this_row = False
+		
+		for key in row.keys():
+			if key.startswith("Sch ") or key.startswith("Act "):
+		
+				# Throw out the row if the time data do not exist
+				if row[key].isspace():
+					drop_this_row = True
+
+				# Convert the plain text values to Python data types
+				row[key] = dateutil.parser.parse(row[key])
+		row["Origin Date"] = dateutil.parser.parse(row["Origin Date"]).date()
+
+		if drop_this_row == False:
+			cleaned_table.append(row)
+
+	return cleaned_table
 
 
 # Determine current date and comparable weekdays
@@ -56,8 +59,8 @@ ONE_WEEK = datetime.timedelta(days=7)
 WEEKS_IN_A_YEAR = 52
 
 days_to_compare = []
-for weeks_ago in range(1, WEEKS_IN_A_YEAR + 1):
-	day_to_compare = today - ONE_WEEK * weeks_ago
-	days_to_compare.append(day_to_compare)
+# for weeks_ago in range(1, WEEKS_IN_A_YEAR + 1):
+# 	day_to_compare = today - ONE_WEEK * weeks_ago
+# 	days_to_compare.append(day_to_compare)
 
 
