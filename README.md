@@ -1,5 +1,5 @@
-amtrak_lateness_predictor
-=========================
+Amtrak Lateness Predictor
+===
 
 The tool Amtrak doesn't want you to have … or at least doesn't publish themselves.
 
