@@ -1,7 +1,7 @@
 import datetime
 import re
 
-import pandas as pd
+import lxml.html
 import requests
 
 
@@ -40,41 +40,67 @@ def clean_response(response_text):
     clean it by removing useless columns and converting data types
     '''
 
-    # Parse the HTML table into a usable object, ignoring the empty top row
-    # There is only one table in the HTML text, so extract that
-    df = pd.io.html.read_html(
-            io=response_text,
-            header=1
-            )[0]
+    # Load the table into the parsing engine, and check its contents
+    doc = lxml.html.fromstring(response_text)
+    table = doc.xpath('//table/tr')
 
-    # Throw out the row if no time information exists
-    df.filter(regex="Sch [A-Z]{2}")[0]
+    assert len(table[0].xpath('th')) == 1
+    assert table[1].xpath('th/text()')[0] == "Origin Date"
+    assert table[1].xpath('th/text()')[1] == "Station"
+    assert table[1].xpath('th/text()')[2].startswith("Sch ")
+    assert table[1].xpath('th/text()')[3].startswith("Act ")
+    assert table[1].xpath('th/text()')[4] == "Comments"
+    assert table[1].xpath('th/text()')[5] == "Service Disruption"
+    assert table[1].xpath('th/text()')[6] == "Cancellations"
+    assert len(table[-1].xpath('td')) == 1
 
-    # Fix data types for the date columns
-    df["departure_date"] = pd.to_datetime(df["Origin Date"])
-    df["scheduled"] = pd.to_datetime(df.filter(regex="Sch [A-Z]{2}")[0])
+    table = table[2:-1]
 
-    # Determine the difference between scheduled and actual times
-    # In almost no cases is this difference more than 24 hours, so
-    # assume that the two are within one day of each other
-    df["delay"] = pd.to_timedelta(
-            arg=(
-            df["Comments"].extract("\D+: (\d*{0,2})\D+\d{0,2}\D*") * 60 +
-            df["Comments"].extract("\D+: \d*{0,2}\D+\(d{0,2})\D*")
-            ),
-            unit="m"
-            )
+    # Convert to native data types
+    DELAY_RE = r'^(?:Departed|Arrived):\s*' \
+            r'(?:(?P<hours>\d{1,2}) hours?(?:,| and)?)?\s*' \
+            r'(?:(?P<minutes>\d{1,2}) minutes?)?\s*' \
+            r'late\.$'
+    df = []
+    for row in table:
+        df_row = {}
 
-    # Identify departure day and station name as composite keys
-    df = df.rename(columns={"Station": "station"})
-    df = df.set_index(["departure_date", "station"])
+        df_row['station'] = row.xpath('td[2]/text()')[0]
 
-    # Return only the columns useful to prediction
-    df = df[["departure_date", "station", "scheduled", "delay"]]
+        try:
+            delay = row.xpath('td[5]//text()')[0]
+        except IndexError:
+            print("No delay information found for {}".format(df_row['station']))
+            continue
+        if re.match(DELAY_RE, delay):
+            try:
+                df_row['delay'] = datetime.timedelta(seconds=
+                        int(re.search(DELAY_RE, delay).group("minutes")) * 60)
+            except TypeError:
+                df_row['delay'] = 0
+            try:
+                df_row['delay'] += datetime.timedelta(seconds=
+                        int(re.search(DELAY_RE, delay).group("hours")) * 60 * 60)
+            except TypeError:
+                pass
+        elif delay.endswith("n time."):
+            df_row['delay'] = datetime.timedelta(0)
+        else:
+            print(
+                    "Unparseable delay information found: '{}'".format(delay))
+            continue
+
+        df_row['origin_date'] = datetime.datetime.strptime(row.xpath(
+                'td[1]/a/text()')[0], '%m/%d/%Y').date()
+        df_row['service_disruption'] = bool(row.xpath('td[6]//text()'))
+        df_row['cancellation'] = bool(row.xpath('td[7]//text()'))
+        
+        df.append(df_row)
+
     return df
 
 
-def get_prediction_for_train(train_number, destination_station):
+def get_prediction_for_train(train_number, destination):
     '''Main function of the module, to perform the prediction'''
 
     # Get and clean all train data from route for last year
@@ -82,22 +108,22 @@ def get_prediction_for_train(train_number, destination_station):
     cleaned_table = clean_response(response_text)
 
     # Filter the data for only the given station, and for applicable weekdays
-    cleaned_table = [
+    filtered_table = [
             row for row in cleaned_table if
-            row["Station"] == destination_station and
-            row["Sch DP"].date().weekday() == datetime.date.today().weekday()
+            row["station"] == destination and
+            row["origin_date"].weekday() == datetime.date.today().weekday()
             ]
 
     # Determine the average delay for the given station
-    delays = [row["delay"] for row in cleaned_table]
+    delays = [row['delay'] for row in filtered_table]
     average_delay = sum(delays, datetime.timedelta(0)) / len(delays)
 
-    print(average_delay)
+    print("Average delay for train {0} going to station {1}: "
+            "{2}".format(train_number, destination, average_delay))
 
-
-# Test example while developing
+# Test example while ddelayeveloping
 if __name__ == "__main__":
     get_prediction_for_train(
             train_number=353,
-            destination_station="HMI"
+            destination="HMI"
             )
