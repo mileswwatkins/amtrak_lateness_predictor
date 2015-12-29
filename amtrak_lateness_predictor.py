@@ -7,6 +7,7 @@ import requests
 
 
 # logging.basicConfig(level=logging.DEBUG)
+PERCENTAGE_TO_ANALYZE = 20
 
 TODAY = datetime.date.today()
 ONE_YEAR_AGO = TODAY - datetime.timedelta(days=365)
@@ -87,9 +88,9 @@ def clean_response(response_text):
 
         response_table_row['station'] = row.xpath('td[2]/text()')[0]
         response_table_row['delay'] = datetime.timedelta(seconds=int(row.xpath('td[6]//text()')[0]) * 60)
-        response_table_row['scheduled_date'] = datetime.datetime.strptime(
+        response_table_row['scheduled'] = datetime.datetime.strptime(
             re.sub(r'\s\([A-Z][a-z]\)', '', row.xpath('td[3]/text()')[0]),
-            '%m/%d/%Y %I:%M %p').date()
+            '%m/%d/%Y %I:%M %p')
         response_table_row['service_disruption'] = bool(row.xpath('td[7]//text()'))
         response_table_row['cancellation'] = bool(row.xpath('td[8]//text()'))
 
@@ -98,29 +99,43 @@ def clean_response(response_text):
     return response_table
 
 
-def filter_table(full_table, desintation, same_weekday=True):
+def filter_table(full_table, desintation):
     ''' Filter the full delay table down to just relevant records '''
+
+    current_train = None
+    newest_status = datetime.datetime(2000, 1, 1)
+    for row in full_table:
+        if row['scheduled'] > newest_status:
+            newest_status = row['scheduled']
+            current_train = row
+
     filtered_table = []
     for row in full_table:
         # Only observe timeliness at the desired desintation
         if row['station'] != desintation:
             continue
-
         # Throwing out cancelled trains seems reasonable
         if row['cancellation']:
             continue
-
-        if same_weekday:
-            if row['scheduled_date'].weekday() != datetime.date.today().weekday():
-                continue
-
+        if current_train['service_disruption'] != row['service_disruption']:
+            continue
+        if row['scheduled'].date().weekday() != current_train['scheduled'].date().weekday():
+            continue
+        row['difference_from_current_delay'] = abs(current_train['delay'] - row['delay'])
         filtered_table.append(row)
+    filtered_table = sorted(filtered_table, key=lambda k: k['difference_from_current_delay'])
+
     logging.debug('{} rows in filtered table'.format(len(filtered_table)))
-    return filtered_table
+    rows_to_analyze = len(filtered_table) * PERCENTAGE_TO_ANALYZE / 100
+    limited_table = filtered_table[:rows_to_analyze]
+    logging.debug('{} rows in table to analyze'.format(len(limited_table)))
+
+    return limited_table
 
 
 def get_mean_delay(table):
     ''' Calculate the average delay from a table including delays '''
+
     delays = [row['delay'] for row in table]
     mean_delay = sum(delays, datetime.timedelta()) / len(delays)
     assert type(mean_delay) == type(datetime.timedelta())
