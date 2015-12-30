@@ -7,7 +7,7 @@ import requests
 
 
 # logging.basicConfig(level=logging.DEBUG)
-PERCENTAGE_TO_ANALYZE = 20
+PERCENTAGE_TO_ANALYZE = 33
 
 TODAY = datetime.date.today()
 ONE_YEAR_AGO = TODAY - datetime.timedelta(days=365)
@@ -23,7 +23,7 @@ def get_chart_url(train_number, station):
         'station': station,
         'date_start': ONE_YEAR_AGO.strftime(DATE_FORMAT),
         'date_end': TODAY.strftime(DATE_FORMAT),
-        'sort': 'd_ar',
+        'sort': 'd_dp',
         'chartsize': '2',
         'smooth': '0'
     }
@@ -42,7 +42,7 @@ def get_response(train_number):
         "station": "",
         "date_start": ONE_YEAR_AGO.strftime(DATE_FORMAT),
         "date_end": TODAY.strftime(DATE_FORMAT),
-        "sort": "d_ar",
+        "sort": "d_dp",
         "sort_dir": "DESC",
         "limit": VERY_LARGE_NUMBER,
         "co": "gt"
@@ -71,10 +71,10 @@ def clean_response(response_text):
     assert len(table[0].xpath('th')) == 1
     assert table[1].xpath('th/text()')[0] == "Origin Date"
     assert table[1].xpath('th/text()')[1] == "Station"
-    assert table[1].xpath('th/text()')[2] == "Sch AR"
-    assert table[1].xpath('th/text()')[3] == "Act AR"
+    assert table[1].xpath('th/text()')[2] == "Sch DP"
+    assert table[1].xpath('th/text()')[3] == "Act DP"
     assert table[1].xpath('th/text()')[4] == "Comments"
-    assert table[1].xpath('th/text()')[5] == "AR Delay (mins)"
+    assert table[1].xpath('th/text()')[5] == "DP Delay (mins)"
     assert table[1].xpath('th/text()')[6] == "Service Disruption"
     assert table[1].xpath('th/text()')[7] == "Cancellations"
     assert len(table[-1].xpath('td')) == 1
@@ -88,6 +88,9 @@ def clean_response(response_text):
 
         response_table_row['station'] = row.xpath('td[2]/text()')[0]
         response_table_row['delay'] = datetime.timedelta(seconds=int(row.xpath('td[6]//text()')[0]) * 60)
+        response_table_row['origin'] = datetime.datetime.strptime(
+            re.sub(r'\s\([A-Z][a-z]\)', '', row.xpath('td[1]/a/text()')[0]),
+            '%m/%d/%Y').date()
         response_table_row['scheduled'] = datetime.datetime.strptime(
             re.sub(r'\s\([A-Z][a-z]\)', '', row.xpath('td[3]/text()')[0]),
             '%m/%d/%Y %I:%M %p')
@@ -99,38 +102,48 @@ def clean_response(response_text):
     return response_table
 
 
-def filter_table(full_table, desintation):
+def filter_table(full_table, destination):
     ''' Filter the full delay table down to just relevant records '''
 
+    # Collect all information on the current train
     current_train = None
-    newest_status = datetime.datetime(2000, 1, 1)
+    newest_train_seen = datetime.datetime(2000, 1, 1)
     for row in full_table:
-        if row['scheduled'] > newest_status:
-            newest_status = row['scheduled']
+        if row['scheduled'] > newest_train_seen:
+            logging.debug('Found a train ({}) newer than before ({})'.format(
+                row['scheduled'], newest_train_seen))
+            newest_train_seen = row['scheduled']
             current_train = row
+    logging.debug("Most current status: {}".format(current_train))
 
-    filtered_table = []
-    for row in full_table:
-        # Only observe timeliness at the desired desintation
-        if row['station'] != desintation:
-            continue
-        # Throwing out cancelled trains seems reasonable
-        if row['cancellation']:
-            continue
-        if current_train['service_disruption'] != row['service_disruption']:
-            continue
-        if row['scheduled'].date().weekday() != current_train['scheduled'].date().weekday():
-            continue
-        row['difference_from_current_delay'] = abs(current_train['delay'] - row['delay'])
-        filtered_table.append(row)
+    filtered_table = full_table
+    filtered_table = [x for x in filtered_table if not x['cancellation']]
+    filtered_table = [x for x in filtered_table if x['service_disruption'] == current_train['service_disruption']]
+    filtered_table = [x for x in filtered_table if x['origin'].weekday() == current_train['origin'].weekday()]
+    logging.debug("{} rows in filtered table".format(len(filtered_table)))
+
+    for row in filtered_table:
+        if row['station'] == current_train['station']:
+            # Calculate how similar this route is to the current train's performance
+            row['difference_from_current_delay'] = abs(current_train['delay'] - row['delay'])
+            for other_row in filtered_table:
+                # Copy this similarity value to the whole of that route
+                if other_row['origin'] == row['origin']:
+                    other_row['difference_from_current_delay'] = row['difference_from_current_delay']
+    filtered_table = [x for x in filtered_table if 'difference_from_current_delay' in x]
     filtered_table = sorted(filtered_table, key=lambda k: k['difference_from_current_delay'])
 
-    logging.debug('{} rows in filtered table'.format(len(filtered_table)))
-    rows_to_analyze = len(filtered_table) * PERCENTAGE_TO_ANALYZE / 100
-    limited_table = filtered_table[:rows_to_analyze]
-    logging.debug('{} rows in table to analyze'.format(len(limited_table)))
+    table_to_analyze = []
+    for row in filtered_table:
+        # Only observe timeliness at the desired destination
+        if row['station'] == destination:
+            table_to_analyze.append(row)
 
-    return limited_table
+    rows_to_analyze = len(table_to_analyze) * PERCENTAGE_TO_ANALYZE / 100
+    table_to_analyze = table_to_analyze[:rows_to_analyze]
+    logging.debug('{} rows in table to analyze'.format(len(table_to_analyze)))
+
+    return table_to_analyze
 
 
 def get_mean_delay(table):
@@ -159,6 +172,6 @@ def get_prediction_for_train(train_number, destination):
 # Test example while developing
 if __name__ == "__main__":
     get_prediction_for_train(
-        train_number=2,
-        destination="NOL"
+        train_number="350",
+        destination="ARB"
     )
